@@ -40,12 +40,13 @@ DAMAGE.
 #include <Misha/Miscellany.h>
 #include <Misha/Polynomial.h>
 
-#undef DEBUG_DESCRIPTOR
+// #undef DEBUG_DESCRIPTOR
+#define DEBUG_DESCRIPTOR
 #include "GetDescriptor.inl"
 
 
 
-Misha::CmdLineParameter< std::string > In( "in" ) , Spec( "spec" ) , Out( "out" ); 
+Misha::CmdLineParameter< std::string > In( "in" ) , Spec( "spec" ) , Texture( "texture" ), SourceVertices("source_vertices"), Out( "out" ); 
 Misha::CmdLineParameter< int > SourceNode( "vertex" ) , HistogramRadius( "hRadius" , 5 ) , OutResolution( "resolution" ) , SourceFace( "tri") , DistanceType( "distance" , DISTANCE_BIHARMONIC );
 Misha::CmdLineParameter< float > ThreshFactor( "tau" , 0.08f ) , Deviation( "dev" , -1. ) , DiffusionTime( "diffusion" , 0.1f );
 Misha::CmdLineParameterArray< float , 3 > BC( "bc" );
@@ -55,6 +56,8 @@ Misha::CmdLineReadable* params[] =
 {
     &In ,
     &Spec ,
+    &Texture ,
+    &SourceVertices ,
     &Out ,
     &SourceNode ,
     &HistogramRadius ,
@@ -79,6 +82,8 @@ void ShowUsage( const char* ex )
     printf( "\t --%s <source face index>\n" , SourceFace.name.c_str() );
     printf( "\t --%s <barycentric coordinate 1> <barycentric coordinate 2> <barycentric coordinate 3>\n" , BC.name.c_str() );
     printf( "\t[--%s <spectral decomposition>]\n" , Spec.name.c_str() );
+    printf( "\t[--%s <texture (grayscale intensity per vertex)>]\n" , Texture.name.c_str() );
+    printf( "\t[--%s <source vertices for computing ECHO descriptors>]\n" , SourceVertices.name.c_str() );
     printf( "\t[--%s <output ECHO descriptor>]\n" , Out.name.c_str() );
     printf( "\t[--%s <distance type>=%d]\n" , DistanceType.name.c_str() , DistanceType.value );
     for( int i=0 ; i<DISTANCE_COUNT ; i++ ) printf( "\t\t%d] %s\n" , i , DistanceNames[i].c_str() );
@@ -166,6 +171,48 @@ Polynomial< 1 , 2*Derivatives+1 > FitDerivativeValuesToPolynomial( double startX
     return P;
 }
 
+std::vector<double> readTextureSignal( const std::string &fileName )
+{
+
+    // std::string fileName = "scalar_per_vertex.txt";
+    std::ifstream fin;
+    fin.open(fileName);
+
+    std::string line;
+    std::vector<double> signal; // use vector of vector instead of pointer to pointer
+    while (std::getline(fin, line))    // read line-by-line
+    {
+        std::istringstream iss(line);  // then process each line separately
+        int x;
+        while (iss >> x)
+        {
+            signal.push_back((double)x);
+        }
+    }
+    // for ( int i = 0; i < signal.size(); i++) std::cout << signal[i] <<std::endl;
+    return signal;
+}
+
+std::vector<int> readSourceVertices( const std::string &fileName )
+{
+
+    std::ifstream fin;
+    fin.open(fileName);
+
+    std::string line;
+    std::vector<int> vertices; // use vector of vector instead of pointer to pointer
+    while (std::getline(fin, line))    // read line-by-line
+    {
+        std::istringstream iss(line);  // then process each line separately
+        int x;
+        while (iss >> x)
+        {
+            vertices.push_back((int)x);
+        }
+    }
+    return vertices;
+}
+
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
 // MAIN
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -178,6 +225,8 @@ void run( void )
     std::vector< double > signal;
     std::vector< std::pair< Point2D< double > , Point2D< double > > > dualFrameField;
     std::vector< double > hks;
+    std::vector< double > texture_per_vertex; // texture signal: gray-scale intensity
+    std::vector< int > source_vertices; // source vertices 
     Spectrum< double > spectrum;
     std::function< double ( double ) > spectralFunction = SpectralFunction( DistanceType.value , DiffusionTime.value );
     std::function< double ( double ) > weightFunction;
@@ -219,19 +268,19 @@ void run( void )
             else return 0.;
         };
     }
-#ifdef DEBUG_DESCRIPTOR
-    {
-        double e=0;
-        static const int COUNT = 10000;
-        for( int i=0 ; i<10000 ; i++ )
-        {
-            double x = (i+0.5)/COUNT * SupportRadius;
-            double d = exp( -x ) - weightFunction( x );
-            e += d*d;
-        }
-        std::cout << "Error: " << e/COUNT << std::endl;
-    }
-#endif // DEBUG_DESCRIPTOR
+// #ifdef DEBUG_DESCRIPTOR
+//     {
+//         double e=0;
+//         static const int COUNT = 10000;
+//         for( int i=0 ; i<10000 ; i++ )
+//         {
+//             double x = (i+0.5)/COUNT * SupportRadius;
+//             double d = exp( -x ) - weightFunction( x );
+//             e += d*d;
+//         }
+//         std::cout << "Error: " << e/COUNT << std::endl;
+//     }
+// #endif // DEBUG_DESCRIPTOR
 
 
     //==Load Mesh===
@@ -249,33 +298,44 @@ void run( void )
     TriMesh< float > tMesh( vertices , triangles );
     if( Verbose.set ) std::cout << "\tGot mesh: " << timer.elapsed() << "(s)" << std::endl;
 
-    //==Load Spectral Decomposition==
-    timer.reset();
-    if( Spec.set ) spectrum.read( Spec.value );
-    else           spectrum.set( vertices , triangles , 200 , 100.f , false );
-    if( Verbose.set ) std::cout << "\tGot spectrum: " << timer.elapsed() << "(s)" << std::endl;
+//     //==Load Spectral Decomposition==
+//     timer.reset();
+//     if( Spec.set ) spectrum.read( Spec.value );
+//     else           spectrum.set( vertices , triangles , 200 , 100.f , false );
+//     if( Verbose.set ) std::cout << "\tGot spectrum: " << timer.elapsed() << "(s)" << std::endl;
 
-    // Compute + smooth HKS
-    timer.reset();
-    hks.resize( vertices.size() );
-#pragma omp parallel for
-    for( int i=0 ; i<vertices.size() ; i++ ) hks[i] = spectrum.HKS( i , 0.1 );
-    if( Verbose.set ) std::cout << "\tGot HKS: " << timer.elapsed() << "(s)" <<  std::endl;
+//     // Compute + smooth HKS
+//     timer.reset();
+//     hks.resize( vertices.size() );
+// #pragma omp parallel for
+//     for( int i=0 ; i<vertices.size() ; i++ ) hks[i] = spectrum.HKS( i , 0.1 );
+//     if( Verbose.set ) std::cout << "\tGot HKS: " << timer.elapsed() << "(s)" <<  std::endl;
 
-    //WARN( "Why are we smoothing the HKS instead of using a larger time-step?" );
-    timer.reset();
-    tMesh.smoothVertexSignal( hks , 1.0e7 ); 
-    if( Verbose.set ) std::cout << "\tSmoothed HKS: " << timer.elapsed() << "(s)" <<  std::endl;
+//     //WARN( "Why are we smoothing the HKS instead of using a larger time-step?" );
+//     timer.reset();
+//     tMesh.smoothVertexSignal( hks , 1.0e7 ); 
+//     if( Verbose.set ) std::cout << "\tSmoothed HKS: " << timer.elapsed() << "(s)" <<  std::endl;
 
-    // [WARNING] We are re-scaling the eigenvectors here
-    if( IsSpectral( DistanceType.value ) )
-#pragma omp parallel for
-        for( int i=0 ; i<spectrum.size() ; i++ )
-        {
-            double scale = spectralFunction( spectrum.eValue(i) );
-            auto &ev = spectrum.eVector(i);
-            for( int j=0 ; j<ev.size() ; j++ ) ev[j] *= scale;
-        }
+//     // [WARNING] We are re-scaling the eigenvectors here
+//     if( IsSpectral( DistanceType.value ) )
+// #pragma omp parallel for
+//         for( int i=0 ; i<spectrum.size() ; i++ )
+//         {
+//             double scale = spectralFunction( spectrum.eValue(i) );
+//             auto &ev = spectrum.eVector(i);
+//             for( int j=0 ; j<ev.size() ; j++ ) ev[j] *= scale;
+//         }
+
+
+    //==Load Texture Signal==
+    timer.reset();
+    texture_per_vertex = readTextureSignal(Texture.value);
+    if( Verbose.set ) std::cout << "\tGot texture: " << timer.elapsed() << "(s)" << std::endl;
+
+    //==Load Source Vertices==
+    timer.reset();
+    source_vertices = readSourceVertices(SourceVertices.value);
+    if( Verbose.set ) std::cout << "\tGot source vertices: " << timer.elapsed() << "(s)" << std::endl;
 
     timer.reset();
     if( IsSpectral( DistanceType.value ) )
@@ -308,7 +368,8 @@ void run( void )
     dualFrameField.resize( triangles.size() );
     {
         std::vector< Point2D< double > > triangleGradients;
-        tMesh.metricGradient( hks , triangleGradients );
+        // tMesh.metricGradient( hks , triangleGradients );
+        tMesh.metricGradient( texture_per_vertex , triangleGradients );
 #pragma omp parallel for
         for( int l=0 ; l<triangles.size(); l++)
         {
@@ -324,115 +385,164 @@ void run( void )
 
     float rho = (float)( ThreshFactor.value * std::sqrt( tMesh.totalArea() / M_PI ) );
 
-    if( SourceNode.set && SourceNode.value<0 )
+    // debug
+    std::cout<< "tau: "<< ThreshFactor.value<<std::endl;
+    std::cout<< "area: "<< tMesh.totalArea()<<std::endl;
+    std::cout<< "support radius: " << rho <<std::endl;
+
+    // USE a list of source vertices
+    if (SourceVertices.set)
     {
-        timer.reset();
+        for( int i=0 ; i<source_vertices.size() ; i++ )
+        {
+
+            timer.reset();
 #ifdef DEBUG_DESCRIPTOR
-        verticesInNeighborhood = 0;
+            verticesInNeighborhood = 0;
 #endif // DEBUG_DESCRIPTOR
-        for( int i=0 ; i<-SourceNode.value ; i++ )
-        {
-            if( IsSpectral( DistanceType.value ) ) spectralEcho< float , NSamples >( tMesh , spectrum , signal , dualFrameField , rand() % vertices.size() , rho , nRadialBins , weightFunction );
-            else                                   geodesicEcho< float , NSamples >( tMesh , signal , dualFrameField, rand() % vertices.size() , rho , nRadialBins , weightFunction );
-        }
+            // Compute ECHO descriptor
+            RegularGrid< float , 2 > F;
+            if( IsSpectral( DistanceType.value ) ) F = spectralEcho< float , NSamples >( tMesh , spectrum , signal , dualFrameField , source_vertices[i] , rho , nRadialBins , weightFunction );
+            else                                   F = geodesicEcho< float , NSamples >( tMesh , signal , dualFrameField, source_vertices[i] , rho , nRadialBins , weightFunction );
+
 #ifdef DEBUG_DESCRIPTOR
-        if( Verbose.set )
-        {
-            std::cout << "\t\tAverage vertices in neighborhood: " << (double)verticesInNeighborhood / (-SourceNode.value) << std::endl;
-            std::cout << "\t\tTime per vertex: " << timer.elapsed() * 1000 / verticesInNeighborhood << "(ms)" << std::endl;
-        }
+            if( Verbose.set )
+            {
+                std::cout << "\t\tVertices in neighborhood: " << verticesInNeighborhood << std::endl;
+                std::cout << "\t\tTime per vertex: " << timer.elapsed() * 1000 / verticesInNeighborhood << "(ms)" << std::endl;
+            }
 #endif // DEBUG_DESCRIPTOR
-        if( Verbose.set )
-        {
-            double e = timer.elapsed();
-            std::cout << "\tGot ECHO descriptors: " << e << "(s) / " << (-SourceNode.value) << " = " << ( e / -SourceNode.value ) << "(s)" <<  std::endl;
-        }
-    }
+            
+            if( NoDiskSupport.set ) F = ResampleSignal( F , OutResolution.value , OutResolution.value );
+            else                    F = ResampleSignalDisk( F , OutResolution.value , OutResolution.value );
+            F = TransposeSignal( F );
+
+            std::string outfile_name = "vert_" + std::to_string(source_vertices[i]) + ".txt";
+            if( Out.set ) outfile_name = Out.value + "/" + outfile_name;
+            std::ofstream echoD;
+            echoD.open( outfile_name );
+
+            for( unsigned int x=0 ; x<F.res(0) ; x++ ) for( unsigned int y=0 ; y<F.res(1) ; y++ )
+            {
+                if( x==F.res(0)-1 && y==F.res(1)-1 ) echoD << F(x,y) << std::endl;
+                else                                 echoD << F(x,y) << " ";
+            }
+
+            echoD.close();
+        } // END for( int i=0 ; i<source_vertices.size() ; i++ ) 
+    } // END if (SourceVertices.set)
     else
     {
-        // Compute ECHO descriptor
-        RegularGrid< float , 2 > F;
-
-        timer.reset();
-#ifdef DEBUG_DESCRIPTOR
-        verticesInNeighborhood = 0;
-#endif // DEBUG_DESCRIPTOR
-        if( SourceNode.set )
+        if( SourceNode.set && SourceNode.value<0 )
         {
-            if( IsSpectral( DistanceType.value ) ) F = spectralEcho< float , NSamples >( tMesh , spectrum , signal , dualFrameField , SourceNode.value , rho , nRadialBins , weightFunction );
-            else                                   F = geodesicEcho< float , NSamples >( tMesh , signal , dualFrameField , SourceNode.value , rho , nRadialBins , weightFunction );
+            timer.reset();
+#ifdef DEBUG_DESCRIPTOR
+            verticesInNeighborhood = 0;
+#endif // DEBUG_DESCRIPTOR
+            for( int i=0 ; i<-SourceNode.value ; i++ )
+            {
+                if( IsSpectral( DistanceType.value ) ) spectralEcho< float , NSamples >( tMesh , spectrum , signal , dualFrameField , rand() % vertices.size() , rho , nRadialBins , weightFunction );
+                else                                   geodesicEcho< float , NSamples >( tMesh , signal , dualFrameField, rand() % vertices.size() , rho , nRadialBins , weightFunction );
+            }
+#ifdef DEBUG_DESCRIPTOR
+            if( Verbose.set )
+            {
+                std::cout << "\t\tAverage vertices in neighborhood: " << (double)verticesInNeighborhood / (-SourceNode.value) << std::endl;
+                std::cout << "\t\tTime per vertex: " << timer.elapsed() * 1000 / verticesInNeighborhood << "(ms)" << std::endl;
+            }
+#endif // DEBUG_DESCRIPTOR
+            if( Verbose.set )
+            {
+                double e = timer.elapsed();
+                std::cout << "\tGot ECHO descriptors: " << e << "(s) / " << (-SourceNode.value) << " = " << ( e / -SourceNode.value ) << "(s)" <<  std::endl;
+            }
         }
         else
         {
-            if( IsSpectral( DistanceType.value ) ) F = spectralEcho< float , NSamples >( tMesh , spectrum , signal , dualFrameField , std::pair< int , Point3D< double > >( SourceFace.value , Point3D< double >( BC.values[0] , BC.values[1] , BC.values[2] ) ) , rho , nRadialBins , weightFunction );
-            else                                   F = geodesicEcho< float , NSamples >( tMesh , signal , dualFrameField , std::pair< int , Point3D< double > >( SourceFace.value , Point3D< double >( BC.values[0] , BC.values[1] , BC.values[2] ) ) , rho , nRadialBins , weightFunction );
-        }
+            // Compute ECHO descriptor
+            RegularGrid< float , 2 > F;
+
+            timer.reset();
 #ifdef DEBUG_DESCRIPTOR
-        if( Verbose.set )
-        {
-            std::cout << "\t\tVertices in neighborhood: " << verticesInNeighborhood << std::endl;
-            std::cout << "\t\tTime per vertex: " << timer.elapsed() * 1000 / verticesInNeighborhood << "(ms)" << std::endl;
-        }
+            verticesInNeighborhood = 0;
 #endif // DEBUG_DESCRIPTOR
-        if( Verbose.set ) std::cout << "\tGot ECHO descriptor: " << timer.elapsed() << "(s)" <<  std::endl;
-
-        if( NoDiskSupport.set ) F = ResampleSignal( F , OutResolution.value , OutResolution.value );
-        else                    F = ResampleSignalDisk( F , OutResolution.value , OutResolution.value );
-
-        F = TransposeSignal( F );
-
-        if( Out.set )
-        {
-            std::string ext = Misha::ToLower( Misha::GetFileExtension( Out.value ) );
-            if( ext==std::string( "txt" ) )
+            if( SourceNode.set )
             {
-                std::ofstream echoD;
-                echoD.open( Out.value );
-
-                for( unsigned int x=0 ; x<F.res(0) ; x++ ) for( unsigned int y=0 ; y<F.res(1) ; y++ )
-                {
-                    if( x==F.res(0)-1 && y==F.res(1)-1 ) echoD << F(x,y) << std::endl;
-                    else                                 echoD << F(x,y) << " ";
-                }
-
-                echoD.close();
+                if( IsSpectral( DistanceType.value ) ) F = spectralEcho< float , NSamples >( tMesh , spectrum , signal , dualFrameField , SourceNode.value , rho , nRadialBins , weightFunction );
+                else                                   F = geodesicEcho< float , NSamples >( tMesh , signal , dualFrameField , SourceNode.value , rho , nRadialBins , weightFunction );
             }
             else
             {
-                unsigned char *pixels = new unsigned char[ F.resolution()*3 ];
+                if( IsSpectral( DistanceType.value ) ) F = spectralEcho< float , NSamples >( tMesh , spectrum , signal , dualFrameField , std::pair< int , Point3D< double > >( SourceFace.value , Point3D< double >( BC.values[0] , BC.values[1] , BC.values[2] ) ) , rho , nRadialBins , weightFunction );
+                else                                   F = geodesicEcho< float , NSamples >( tMesh , signal , dualFrameField , std::pair< int , Point3D< double > >( SourceFace.value , Point3D< double >( BC.values[0] , BC.values[1] , BC.values[2] ) ) , rho , nRadialBins , weightFunction );
+            }
+#ifdef DEBUG_DESCRIPTOR
+            if( Verbose.set )
+            {
+                std::cout << "\t\tVertices in neighborhood: " << verticesInNeighborhood << std::endl;
+                std::cout << "\t\tTime per vertex: " << timer.elapsed() * 1000 / verticesInNeighborhood << "(ms)" << std::endl;
+            }
+#endif // DEBUG_DESCRIPTOR
+            if( Verbose.set ) std::cout << "\tGot ECHO descriptor: " << timer.elapsed() << "(s)" <<  std::endl;
 
-                int count = 0;
-                double dev = 0;
-                double sumD = 0;
-                for( int i=0 ; i<F.resolution() ; i++ ) if( F[i]<std::numeric_limits< float >::infinity() ) dev += F[i] * F[i] , sumD += F[i], count++;
+            if( NoDiskSupport.set ) F = ResampleSignal( F , OutResolution.value , OutResolution.value );
+            else                    F = ResampleSignalDisk( F , OutResolution.value , OutResolution.value );
 
-                dev = sqrt( dev/count );
-                double hue , saturation;
-                if( Deviation.value<=0 )
+            F = TransposeSignal( F );
+
+            if( Out.set )
+            {
+                std::string ext = Misha::ToLower( Misha::GetFileExtension( Out.value ) );
+                if( ext==std::string( "txt" ) )
                 {
-                    saturation = 0.;
-                    hue = 0;
-                    std::cout << "Deviation: " << dev << std::endl;
-                    std::cout << "Sum: " << sumD << std::endl;
+                    std::ofstream echoD;
+                    echoD.open( Out.value );
+
+                    for( unsigned int x=0 ; x<F.res(0) ; x++ ) for( unsigned int y=0 ; y<F.res(1) ; y++ )
+                    {
+                        if( x==F.res(0)-1 && y==F.res(1)-1 ) echoD << F(x,y) << std::endl;
+                        else                                 echoD << F(x,y) << " ";
+                    }
+
+                    echoD.close();
                 }
                 else
                 {
-                    saturation = 1.;
-                    hue = 4.*M_PI/3. * dev / Deviation.value;
-                }
-                for( int i=0 ; i<F.resolution() ; i++ )
-                {
-                    if( F[i]==std::numeric_limits< float >::infinity() ) pixels[3*i+0] = pixels[3*i+1] = pixels[3*i+2] = 255;
+                    unsigned char *pixels = new unsigned char[ F.resolution()*3 ];
+
+                    int count = 0;
+                    double dev = 0;
+                    double sumD = 0;
+                    for( int i=0 ; i<F.resolution() ; i++ ) if( F[i]<std::numeric_limits< float >::infinity() ) dev += F[i] * F[i] , sumD += F[i], count++;
+
+                    dev = sqrt( dev/count );
+                    double hue , saturation;
+                    if( Deviation.value<=0 )
+                    {
+                        saturation = 0.;
+                        hue = 0;
+                        std::cout << "Deviation: " << dev << std::endl;
+                        std::cout << "Sum: " << sumD << std::endl;
+                    }
                     else
                     {
-                        double d = std::max( 0. , std::min( F[i] / (3.*dev) , 1. ) );
-                        Point3D< double > rgb , hsv( hue , saturation , d );
-                        Miscellany::HSVtoRGB( &hsv[0] , &rgb[0] );
-                        for( int c=0 ; c<3 ; c++ ) pixels[3*i+c] = (unsigned char)(int)floor( rgb[c] * 255 );
+                        saturation = 1.;
+                        hue = 4.*M_PI/3. * dev / Deviation.value;
                     }
+                    for( int i=0 ; i<F.resolution() ; i++ )
+                    {
+                        if( F[i]==std::numeric_limits< float >::infinity() ) pixels[3*i+0] = pixels[3*i+1] = pixels[3*i+2] = 255;
+                        else
+                        {
+                            double d = std::max( 0. , std::min( F[i] / (3.*dev) , 1. ) );
+                            Point3D< double > rgb , hsv( hue , saturation , d );
+                            Miscellany::HSVtoRGB( &hsv[0] , &rgb[0] );
+                            for( int c=0 ; c<3 ; c++ ) pixels[3*i+c] = (unsigned char)(int)floor( rgb[c] * 255 );
+                        }
+                    }
+                    ImageWriter::Write( Out.value.c_str() , pixels , OutResolution.value , OutResolution.value , 3 );
+                    delete[] pixels;
                 }
-                ImageWriter::Write( Out.value.c_str() , pixels , OutResolution.value , OutResolution.value , 3 );
-                delete[] pixels;
             }
         }
     }

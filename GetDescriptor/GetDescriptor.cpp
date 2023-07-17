@@ -386,9 +386,14 @@ void run( void )
     float rho = (float)( ThreshFactor.value * std::sqrt( tMesh.totalArea() / M_PI ) );
 
     // debug
-    std::cout<< "tau: "<< ThreshFactor.value<<std::endl;
-    std::cout<< "area: "<< tMesh.totalArea()<<std::endl;
-    std::cout<< "support radius: " << rho <<std::endl;
+#ifdef DEBUG_DESCRIPTOR
+            if( Verbose.set )
+            {
+                std::cout<< "tau: "<< ThreshFactor.value<<std::endl;
+                std::cout<< "area: "<< tMesh.totalArea()<<std::endl;
+                std::cout<< "support radius: " << rho <<std::endl;
+            }
+#endif // DEBUG_DESCRIPTOR
 
     // USE a list of source vertices
     if (SourceVertices.set)
